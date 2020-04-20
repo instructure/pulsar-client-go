@@ -207,7 +207,8 @@ func (p *partitionProducer) runEventsLoop() {
 			case *sendRequest:
 				p.internalSend(v)
 			case *connectionClosed:
-				p.reconnectToBroker()
+				// kick off reconnect to not block processing of events
+				go p.reconnectToBroker()
 			case *flushRequest:
 				p.internalFlush(v)
 			case *closeProducer:
