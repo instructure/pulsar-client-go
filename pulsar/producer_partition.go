@@ -41,8 +41,10 @@ const (
 )
 
 var (
-	errFailAddBatch    = errors.New("message send failed")
-	errMessageTooLarge = errors.New("message size exceeds MaxMessageSize")
+	errFailAddBatch     = errors.New("message send failed")
+	errMessageTooLarge  = errors.New("message size exceeds MaxMessageSize")
+	errEventChanFull    = errors.New("event channel is full")
+	errMaxPendingIsFull = errors.New("max pending messages is full")
 )
 
 type partitionProducer struct {
@@ -85,6 +87,13 @@ func newPartitionProducer(client *client, topic string, options *ProducerOptions
 		maxPendingMessages = options.MaxPendingMessages
 	}
 
+	// eventsChan should be large enough to minimize blocking in
+	// normal operation but should still minimize number of queued events
+	// in failure
+	eventsChanSize := maxPendingMessages / 10
+	if eventsChanSize < 10 {
+		eventsChanSize = 10
+	}
 	p := &partitionProducer{
 		state:            producerInit,
 		log:              log.WithField("topic", topic),
@@ -92,7 +101,7 @@ func newPartitionProducer(client *client, topic string, options *ProducerOptions
 		topic:            topic,
 		options:          options,
 		producerID:       client.rpcClient.NewProducerID(),
-		eventsChan:       make(chan interface{}, 10),
+		eventsChan:       make(chan interface{}, eventsChanSize),
 		batchFlushTicker: time.NewTicker(batchingMaxPublishDelay),
 		publishSemaphore: make(internal.Semaphore, maxPendingMessages),
 		pendingQueue:     internal.NewBlockingQueue(maxPendingMessages),
@@ -379,14 +388,34 @@ func (p *partitionProducer) Send(ctx context.Context, msg *ProducerMessage) (Mes
 
 func (p *partitionProducer) SendAsync(ctx context.Context, msg *ProducerMessage,
 	callback func(MessageID, *ProducerMessage, error)) {
-	p.publishSemaphore.Acquire()
 	sr := &sendRequest{
 		ctx:              ctx,
 		msg:              msg,
 		callback:         callback,
 		flushImmediately: false,
 	}
+	if p.options.NeverBlockOnSendAsync {
+		p.sendAsyncNoBlock(sr)
+	} else {
+		p.sendAsyncBlock(sr)
+	}
+}
+
+func (p *partitionProducer) sendAsyncBlock(sr *sendRequest) {
+	p.publishSemaphore.Acquire()
 	p.eventsChan <- sr
+}
+
+func (p *partitionProducer) sendAsyncNoBlock(sr *sendRequest) {
+	gotLock := p.publishSemaphore.TryAcquire()
+	if !gotLock {
+		sr.callback(nil, nil, errMaxPendingIsFull)
+	}
+	select {
+	case p.eventsChan <- sr:
+	default:
+		sr.callback(nil, nil, errEventChanFull)
+	}
 }
 
 func (p *partitionProducer) internalSendAsync(ctx context.Context, msg *ProducerMessage,

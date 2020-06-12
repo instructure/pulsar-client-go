@@ -28,6 +28,17 @@ func (s Semaphore) Acquire() {
 	s <- true
 }
 
+// Try to acquire a permit, returning true if it succeeding, false
+// if it failed
+func (s Semaphore) TryAcquire() bool {
+	select {
+	case s <- true:
+		return true
+	default:
+		return false
+	}
+}
+
 // Release a permit, returning it to the semaphore.
 
 // Release a permit, increasing the number of available permits by

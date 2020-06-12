@@ -111,6 +111,12 @@ type ProducerOptions struct {
 	// If set to a value greater than 1, messages will be queued until this threshold is reached or
 	// batch interval has elapsed.
 	BatchingMaxMessages uint
+
+	// The SendAsync method can block if either the events channel or the maxPendingMessages queue is full
+	// With this option set to true, this won't happen, and instead an error will be passed to the callback
+	// This is an advanced option and forces the user to deal with any full queues or re-connecting clients
+	// but does give guarantees on never blocking
+	NeverBlockOnSendAsync bool
 }
 
 // Producer is used to publish messages on a topic

@@ -817,3 +817,80 @@ func TestMaxMessageSize(t *testing.T) {
 		}
 	}
 }
+
+func TestProducerNoBlock(t *testing.T) {
+	c, err := NewClient(ClientOptions{
+		URL: serviceURL,
+	})
+	assert.NoError(t, err)
+	defer c.Close()
+	clientImpl, ok := c.(*client)
+	if !ok {
+		assert.Fail(t, "should have been able to cast client")
+	}
+	opts := &ProducerOptions{
+		NeverBlockOnSendAsync: true,
+	}
+	workTopic := newTopicName()
+	workProducer, err := newPartitionProducer(clientImpl, workTopic, opts, 0)
+	wg := sync.WaitGroup{}
+	wg.Add(10)
+	errors := internal.NewBlockingQueue(10)
+
+	for i := 0; i < 10; i++ {
+		workProducer.SendAsync(context.Background(), &ProducerMessage{
+			Payload: []byte("hello"),
+		}, func(id MessageID, message *ProducerMessage, e error) {
+			if e != nil {
+				log.WithError(e).Error("Failed to publish")
+				errors.Put(e)
+			} else {
+				log.Info("Published message ", id)
+			}
+			wg.Done()
+		})
+
+		assert.NoError(t, err)
+	}
+
+	err = workProducer.Flush()
+	assert.Nil(t, err)
+
+	wg.Wait()
+
+	assert.Equal(t, 0, errors.Size())
+
+	opts = &ProducerOptions{
+		NeverBlockOnSendAsync: true,
+		MaxPendingMessages: 1,
+	}
+	// test to make sure we get an error if the event channel is full
+	failProducer, err := newPartitionProducer(clientImpl, newTopicName(), opts, 0)
+	assert.NoError(t, err)
+	wg.Add(2)
+	errors = internal.NewBlockingQueue(10)
+	hadExpectedError := false
+
+	for i := 0; i < 2; i++ {
+		failProducer.SendAsync(context.Background(), &ProducerMessage{
+			Payload: []byte("hello"),
+		}, func(id MessageID, message *ProducerMessage, e error) {
+			if i != 1 && e != nil {
+				log.WithError(e).Error("Failed to publish")
+				errors.Put(e)
+			} else if e != nil && e.Error() == errMaxPendingIsFull.Error() {
+				hadExpectedError = true
+				log.Info("had expected maxPendingFillUp")
+			}
+			wg.Done()
+		})
+	}
+
+	err = workProducer.Flush()
+	assert.Nil(t, err)
+
+	wg.Wait()
+
+	assert.Equal(t, 0, errors.Size())
+	assert.True(t, hadExpectedError)
+}
